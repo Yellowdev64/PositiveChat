@@ -1,0 +1,3 @@
+pynacl
+pyside6
+qrcode[pil]
