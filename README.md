@@ -9,10 +9,15 @@ A fully encrypted, serverless P2P chat app for Linux. Built with Python & PySide
 - 🖥️ Modern dark-mode UI with message bubbles
 - 📦 Zero dependencies on cloud servers
 
+
+## 🤝 Built With
+This project was developed with the assistance of **Qwen 3.6**, an AI coding assistant.
+
+
 ## 🐧 Installation
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/PositiveChat.git
+git clone https://github.com/Yellowdev64/PositiveChat.git
 cd PositiveChat
 
 # 2. Make launcher executable
