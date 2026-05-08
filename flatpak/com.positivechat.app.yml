@@ -1,0 +1,24 @@
+app-id: com.positivechat.app
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: python3 gui_chat.py
+finish-args:
+  - --share=network
+  - --filesystem=home
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+modules:
+  - name: positivechat
+    buildsystem: simple
+    build-commands:
+      # Install dependencies (network works by default in build sandbox)
+      - pip3 install --no-cache-dir --prefix=/app pynacl pyside6 "qrcode[pil]"
+      # Copy app files
+      - install -Dm755 gui_chat.py /app/bin/gui_chat.py
+      - install -Dm755 setup_screen.py /app/bin/setup_screen.py
+      - install -Dm755 placeholder_ai.py /app/bin/placeholder_ai.py
+    sources:
+      - type: dir
+        path: ..

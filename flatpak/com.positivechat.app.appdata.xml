@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.positivechat.app</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>PositiveChat</name>
+  <summary>Encrypted P2P chat with positive placeholders</summary>
+  <description>
+    <p>A fully encrypted, serverless peer-to-peer chat app for Linux. Messages are protected with PyNaCl and display as uplifting placeholders until the receiver decrypts them.</p>
+    <p>Features:</p>
+    <ul>
+      <li>End-to-end encryption (no cloud servers)</li>
+      <li>QR code LAN peer discovery</li>
+      <li>Positive message placeholders</li>
+      <li>Local profile system</li>
+      <li>Modern dark-mode UI</li>
+    </ul>
+  </description>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/Yellowdev64/PositiveChat/main/screenshot1.png</image>
+    </screenshot>
+  </screenshots>
+  <url type="homepage">https://github.com/Yellowdev64/PositiveChat</url>
+  <url type="bugtracker">https://github.com/Yellowdev64/PositiveChat/issues</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="1.0.0" date="2026-05-07"/>
+  </releases>
+</component>
