@@ -233,7 +233,7 @@ class MessageBubble(QWidget):
 
         self.lbl = QLabel(text)
         self.lbl.setWordWrap(True)
-        self.lbl.setMinimumWidth(60)
+        self.lbl.setMinimumWidth(400)
 
         if decrypt_data:
             self.btn = QPushButton("Decrypt")
@@ -443,7 +443,7 @@ class LobbyScreen(QWidget):
         lay.setSpacing(12)
 
         # Profile Button
-        self.profile_btn = QPushButton("Profile! By clicking here you can add change name/picture")
+        self.profile_btn = QPushButton("Profile")
         self.profile_btn.setStyleSheet("QPushButton { text-align: left; padding: 8px; }")
         lay.addWidget(self.profile_btn)
 
