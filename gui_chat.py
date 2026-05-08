@@ -46,7 +46,6 @@ box = None
 db = None
 my_private_key = None
 my_public_key = None
-peer_public_key = None
 session_box = None
 
 AVATAR_DIR.mkdir(exist_ok=True)
@@ -55,7 +54,6 @@ DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 def initialize_app():
     global box, db, my_private_key, my_public_key
-    # Load or generate persistent key pair for this device
     if not KEY_PATH.exists():
         my_private_key = PrivateKey.generate()
         KEY_PATH.write_bytes(bytes(my_private_key))
@@ -89,7 +87,6 @@ def save_profile(name, avatar_path=None):
     return profile
 
 
-# 🤖 AI PLACEHOLDER
 try:
     from placeholder_ai import generate_placeholder
 except ImportError:
@@ -100,8 +97,7 @@ except ImportError:
 def prepare_outgoing(text, use_ai=False, sender_name="You"):
     global session_box
     if session_box is None:
-        raise Exception("No secure session established")
-
+        raise Exception("Session not ready")
     nonce = os.urandom(24)
     ct = session_box.encrypt(text.encode(), nonce)
     placeholder = generate_placeholder(text, use_ai=use_ai)
@@ -116,12 +112,11 @@ class NetworkHandler(QObject):
     msg_received = Signal(str)
     file_received = Signal(str, bytes)
     status_update = Signal(str)
+    secure_session_ready = Signal(bytes)
     conn = None
     sock = None
 
     def start(self, mode, ip="127.0.0.1"):
-        global session_box, peer_public_key
-
         def run():
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -129,47 +124,36 @@ class NetworkHandler(QObject):
                 if mode == "host":
                     self.sock.bind(("0.0.0.0", PORT))
                     self.sock.listen(1)
-                    self.status_update.emit("🟢 Listening for peers...")
+                    self.status_update.emit("🟢 Listening...")
                     self.conn, _ = self.sock.accept()
                     self.sock.close()
-                    # Send public key first
-                    self.conn.sendall((f"PUBKEY|{base64.b64encode(bytes(my_public_key)).decode()}\n").encode())
                 else:
                     self.status_update.emit("🔵 Connecting...")
                     self.sock.connect((ip, PORT))
                     self.conn = self.sock
 
-                self.status_update.emit("✅ Connected!")
+                self.status_update.emit("✅ Connected! Exchanging keys...")
+                self.conn.sendall((f"PUBKEY|{base64.b64encode(bytes(my_public_key)).decode()}\n").encode())
 
-                # Phase 1: Exchange public keys
-                pubkey_data = self.conn.recv(4096).decode("utf-8", errors="ignore").strip()
-                if pubkey_data.startswith("PUBKEY|"):
-                    peer_b64 = pubkey_data.split("|")[1]
-                    peer_public_key = base64.b64decode(peer_b64)
-                    session_box = Box(my_private_key, PublicKey(peer_public_key))
-                    self.status_update.emit(" Secure session established!")
-                else:
-                    raise ValueError("Invalid key exchange")
-
-                # Phase 2: Message/File loop
                 buffer = b""
                 while True:
                     chunk = self.conn.recv(4096)
-                    if not chunk:
-                        break
+                    if not chunk: break
                     buffer += chunk
-
                     while b"\n" in buffer:
                         line, buffer = buffer.split(b"\n", 1)
                         line = line.decode("utf-8", errors="ignore").strip()
-
-                        if line.startswith("FILE|"):
+                        if line.startswith("PUBKEY|"):
+                            peer_b64 = line.split("|")[1]
+                            peer_pub_bytes = base64.b64decode(peer_b64)
+                            self.status_update.emit("🔑 Session established!")
+                            self.secure_session_ready.emit(peer_pub_bytes)
+                        elif line.startswith("FILE|"):
                             _, filename, size_str = line.split("|")
                             size = int(size_str)
                             while len(buffer) < size:
                                 c = self.conn.recv(4096)
-                                if not c:
-                                    raise ConnectionError("Connection lost during file transfer")
+                                if not c: raise ConnectionError("Lost")
                                 buffer += c
                             file_data = buffer[:size]
                             buffer = buffer[size:]
@@ -214,9 +198,8 @@ class NetworkHandler(QObject):
             return False
 
     def disconnect(self):
-        global session_box, peer_public_key
+        global session_box
         session_box = None
-        peer_public_key = None
         try:
             if self.conn: self.conn.close()
             if self.sock: self.sock.close()
@@ -224,7 +207,7 @@ class NetworkHandler(QObject):
             pass
 
 
-# 💬 MESSAGE BUBBLE (Text)
+# 💬 MESSAGE BUBBLE
 class MessageBubble(QWidget):
     def __init__(self, text, is_sent=False, decrypt_data=None):
         super().__init__()
@@ -242,22 +225,24 @@ class MessageBubble(QWidget):
 
         self.lbl = QLabel(text)
         self.lbl.setWordWrap(True)
-        self.lbl.setMinimumWidth(60)
+        self.lbl.setMinimumWidth(400)
 
         if decrypt_data:
             self.btn = QPushButton("Decrypt")
             self.btn.setFixedWidth(80)
             self.btn.clicked.connect(self._toggle)
+        else:
+            self.btn = None
 
         base = "background-color: #2a2a2a; color: #e0e0e0; padding: 10px 12px; border-radius: 14px; max-width: 280px;"
         if is_sent:
             lay.addStretch()
             lay.addWidget(self.lbl)
-            if decrypt_data: lay.addWidget(self.btn)
+            if self.btn: lay.addWidget(self.btn)
             self.lbl.setStyleSheet(base.replace("#2a2a2a", "#0d8a4a"))
         else:
             lay.addWidget(self.lbl)
-            if decrypt_data: lay.addWidget(self.btn)
+            if self.btn: lay.addWidget(self.btn)
             lay.addStretch()
             self.lbl.setStyleSheet(base)
 
@@ -280,18 +265,16 @@ class MessageBubble(QWidget):
                 self.btn.setEnabled(False)
 
 
-#  FILE BUBBLE
+# 📎 FILE BUBBLE
 class FileBubble(QWidget):
     def __init__(self, filename, filesize, is_sent, save_callback=None):
         super().__init__()
         lay = QHBoxLayout(self)
         lay.setContentsMargins(6, 4, 6, 4)
         lay.setSpacing(8)
-
         icon = QLabel("📎")
         icon.setStyleSheet("font-size: 24px; min-width: 30px;")
         lay.addWidget(icon)
-
         info = QVBoxLayout()
         name_lbl = QLabel(filename)
         name_lbl.setStyleSheet("font-weight: bold;")
@@ -300,9 +283,7 @@ class FileBubble(QWidget):
         info.addWidget(name_lbl)
         info.addWidget(size_lbl)
         lay.addLayout(info)
-
         base = "background-color: #2a2a2a; color: #e0e0e0; padding: 10px 12px; border-radius: 14px;"
-
         if is_sent:
             lay.addStretch()
             self.setStyleSheet(base.replace("#2a2a2a", "#0d8a4a"))
@@ -324,32 +305,25 @@ class QRDialog(QDialog):
         self.resize(340, 380)
         lay = QVBoxLayout(self)
         lay.setSpacing(12)
-
         link_edit = QLineEdit(link)
         link_edit.setReadOnly(True)
-        link_edit.setStyleSheet("QLineEdit { padding: 6px; font-family: monospace; }")
         lay.addWidget(link_edit)
-
         copy_btn = QPushButton("📋 Copy Link")
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(link))
         lay.addWidget(copy_btn)
-
         qr = qrcode.QRCode(box_size=8, border=4)
         qr.add_data(link)
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white")
-
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         buf.seek(0)
         pm = QPixmap()
         pm.loadFromData(buf.read(), "PNG")
-
         qr_lbl = QLabel()
         qr_lbl.setPixmap(pm.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         qr_lbl.setAlignment(Qt.AlignCenter)
         lay.addWidget(qr_lbl)
-
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
         lay.addWidget(close_btn)
@@ -365,23 +339,19 @@ class ProfileDialog(QDialog):
         self.resize(320, 360)
         lay = QVBoxLayout(self)
         lay.setSpacing(14)
-
         self.avatar_lbl = QLabel()
         self.avatar_lbl.setAlignment(Qt.AlignCenter)
         self.avatar_lbl.setFixedSize(100, 100)
         self.avatar_lbl.setStyleSheet("background-color: #2a2a2a; border-radius: 50px; color: #888;")
         self._refresh_avatar()
         lay.addWidget(self.avatar_lbl)
-
         self.change_btn = QPushButton("🖼️ Change Picture")
         self.change_btn.clicked.connect(self._select_avatar)
         lay.addWidget(self.change_btn)
-
         lay.addWidget(QLabel("Display Name:"))
         self.name_input = QLineEdit(self.profile.get("name", ""))
         self.name_input.setPlaceholderText("Enter display name")
         lay.addWidget(self.name_input)
-
         self.save_btn = QPushButton("💾 Save & Close")
         self.save_btn.clicked.connect(self.accept)
         lay.addWidget(self.save_btn)
@@ -392,11 +362,11 @@ class ProfileDialog(QDialog):
             pm = QPixmap(str(path)).scaled(90, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.avatar_lbl.setPixmap(pm)
         else:
-            self.avatar_lbl.setText("")
+            self.avatar_lbl.setText("👤")
 
     def _select_avatar(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Profile Picture", str(AVATAR_DIR),
-                                                   "Images (*.png *.jpg *.jpeg *.svg *.gif)")
+                                                   "Images (*.png *.jpg *.jpeg)")
         if file_path:
             dest = AVATAR_DIR / "current_avatar.png"
             shutil.copy(file_path, dest)
@@ -415,31 +385,27 @@ class WelcomeScreen(QWidget):
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignCenter)
         lay.setSpacing(16)
-
         title = QLabel("Ready to dive to the world of positivity?")
         title.setFont(QFont("Segoe UI", 18, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setWordWrap(True)
         lay.addWidget(title)
-
         self.login_btn = QPushButton("Log In")
         self.reg_btn = QPushButton("Register")
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.login_btn)
         btn_layout.addWidget(self.reg_btn)
         lay.addLayout(btn_layout)
-
         self.reg_input = QLineEdit()
         self.reg_input.setPlaceholderText("Enter your display name")
         self.reg_input.hide()
         lay.addWidget(self.reg_input)
-
         self.save_btn = QPushButton("Save Profile")
         self.save_btn.hide()
         lay.addWidget(self.save_btn)
 
 
-# 🖥️ SCREEN 2: LOBBY
+# 🖥️ SCREEN 2: LOBBY (Matching PDF exactly)
 class LobbyScreen(QWidget):
     def __init__(self):
         super().__init__()
@@ -447,43 +413,46 @@ class LobbyScreen(QWidget):
         lay.setContentsMargins(15, 15, 15, 15)
         lay.setSpacing(12)
 
-        top = QHBoxLayout()
-        self.avatar_lbl = QLabel()
-        self.avatar_lbl.setFixedSize(40, 40)
-        self.avatar_lbl.setStyleSheet("background-color: #2a2a2a; border-radius: 20px; color: #888; font-size: 10px;")
+        # Top: Profile button
+        self.profile_btn = QPushButton("Profile")
+        self.profile_btn.setStyleSheet("QPushButton { text-align: left; padding: 8px; }")
+        lay.addWidget(self.profile_btn)
+
+        # Avatar (small, next to profile)
+        self.avatar_lbl = QLabel("👤")
+        self.avatar_lbl.setFixedSize(30, 30)
         self.avatar_lbl.setAlignment(Qt.AlignCenter)
-        self.avatar_lbl.setText("👤")
-        top.addWidget(self.avatar_lbl)
+        lay.addWidget(self.avatar_lbl)
 
-        self.profile_btn = QPushButton("Profile! By clicking here you can add change name/picture")
-        self.profile_btn.setStyleSheet("QPushButton { text-align: left; padding-left: 8px; }")
-        top.addWidget(self.profile_btn)
-        lay.addLayout(top)
-
+        # Status
         self.status_lbl = QLabel("Status: Offline")
         self.status_lbl.setStyleSheet("color: #888;")
         lay.addWidget(self.status_lbl)
 
+        # User list
         self.user_list = QListWidget()
-        self.user_list.setFixedHeight(140)
+        self.user_list.setFixedHeight(100)
         self.user_list.addItem(QListWidgetItem("No active connections"))
         lay.addWidget(self.user_list)
 
+        # QR Button
         self.qr_btn = QPushButton("Scan or create QR link")
-        self.qr_btn.clicked.connect(self.show_qr_stub)
         lay.addWidget(self.qr_btn)
 
+        # Create one time link button
         self.host_btn = QPushButton("Create a one time link")
         lay.addWidget(self.host_btn)
 
-        link_row = QHBoxLayout()
+        # ✅ ALWAYS VISIBLE: Link input field (as per PDF)
         self.join_input = QLineEdit()
         self.join_input.setPlaceholderText("Create or add one time link")
-        self.join_btn = QPushButton("Join")
-        link_row.addWidget(self.join_input)
-        link_row.addWidget(self.join_btn)
-        lay.addLayout(link_row)
+        lay.addWidget(self.join_input)
 
+        # Join button
+        self.join_btn = QPushButton("Join")
+        lay.addWidget(self.join_btn)
+
+        # Group chat button
         self.group_btn = QPushButton("Create a group chat option")
         self.group_btn.setEnabled(False)
         lay.addWidget(self.group_btn)
@@ -491,7 +460,7 @@ class LobbyScreen(QWidget):
     def update_avatar(self, profile):
         path = profile.get("avatar")
         if path and Path(path).exists():
-            pm = QPixmap(str(path)).scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pm = QPixmap(str(path)).scaled(26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.avatar_lbl.setPixmap(pm)
         else:
             self.avatar_lbl.setText("👤")
@@ -516,6 +485,7 @@ class ChatScreen(QWidget):
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(10)
 
+        # Header
         header = QHBoxLayout()
         self.back_btn = QPushButton("← Back")
         self.header_name = QLabel("Profile of the user Chat")
@@ -526,19 +496,19 @@ class ChatScreen(QWidget):
         header.addStretch()
         lay.addLayout(header)
 
+        # Chat area
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
         self.chat_cont = QWidget(objectName="chatContainer")
         self.chat_lay = QVBoxLayout(self.chat_cont)
         self.chat_lay.setContentsMargins(4, 4, 4, 4)
         self.chat_lay.setSpacing(8)
         self.chat_lay.addStretch()
-
         self.scroll.setWidget(self.chat_cont)
         lay.addWidget(self.scroll)
 
+        # Input row
         input_row = QHBoxLayout()
         self.attach_btn = QPushButton("📎")
         self.attach_btn.setFixedWidth(36)
@@ -574,6 +544,7 @@ class PositiveChatApp(QMainWindow):
         self.net.msg_received.connect(self.show_incoming)
         self.net.file_received.connect(self.handle_file_received)
         self.net.status_update.connect(self.update_status)
+        self.net.secure_session_ready.connect(self._on_session_ready)
 
         self.stacked = QStackedWidget()
         self.welcome = WelcomeScreen()
@@ -593,11 +564,10 @@ class PositiveChatApp(QMainWindow):
         self.welcome.reg_btn.clicked.connect(self.show_register_input)
         self.welcome.save_btn.clicked.connect(self.handle_register)
         self.welcome.reg_input.returnPressed.connect(self.handle_register)
-
         self.lobby.profile_btn.clicked.connect(self.open_profile_dialog)
         self.lobby.host_btn.clicked.connect(self.handle_host)
         self.lobby.join_btn.clicked.connect(self.handle_join)
-
+        self.lobby.qr_btn.clicked.connect(self.lobby.show_qr_stub)
         self.chat.back_btn.clicked.connect(self.return_to_lobby)
         self.chat.send_btn.clicked.connect(self.send_message)
         self.chat.input_box.returnPressed.connect(self.send_message)
@@ -651,7 +621,6 @@ class PositiveChatApp(QMainWindow):
             self.profile = dlg.get_updated_profile()
             PROFILE_PATH.write_text(json.dumps(self.profile))
             self.lobby.update_avatar(self.profile)
-            QMessageBox.information(self, "Profile Updated", "Name & picture saved successfully!")
 
     def handle_attachment(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Attach File", str(PROJECT_DIR), "All Files (*)")
@@ -661,14 +630,12 @@ class PositiveChatApp(QMainWindow):
                 filesize = Path(file_path).stat().st_size
                 self.chat.add_file_bubble(filename, filesize, is_sent=True)
             else:
-                QMessageBox.warning(self, "Send Failed", "Not connected or file too large.")
+                QMessageBox.warning(self, "Send Failed", "Not connected")
 
     def handle_host(self):
         self.lobby.host_btn.setText("🟢 Listening...")
         self.lobby.host_btn.setEnabled(False)
-        self.lobby.join_btn.setEnabled(False)
         self.net.start("host")
-
         ip = "127.0.0.1"
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -676,26 +643,22 @@ class PositiveChatApp(QMainWindow):
                 ip = s.getsockname()[0]
         except:
             pass
-
         session = ''.join(random.choices("abcdef0123456789", k=6))
         link = f"positivechat://{ip}:{PORT}/{session}"
         QRDialog(link).exec()
-
         self.lobby.host_btn.setText("Create a one time link")
         self.lobby.host_btn.setEnabled(True)
-        self.lobby.join_btn.setEnabled(True)
 
     def handle_join(self):
         raw = self.lobby.join_input.text().strip()
         match = re.match(r"positivechat://([\d.]+):(\d+)/?", raw)
         if not match:
-            QMessageBox.warning(self, "Invalid Link", "Paste a valid positivechat:// link.")
+            QMessageBox.warning(self, "Invalid Link", "Paste valid link like: positivechat://192.168.1.5:5555/abc123")
             return
         ip, port = match.group(1), int(match.group(2))
         if port != PORT:
             QMessageBox.warning(self, "Port Mismatch", f"App uses port {PORT}")
             return
-
         self.lobby.join_input.clear()
         self.lobby.host_btn.setEnabled(False)
         self.lobby.join_btn.setEnabled(False)
@@ -703,17 +666,25 @@ class PositiveChatApp(QMainWindow):
 
     def update_status(self, txt):
         self.lobby.status_lbl.setText(f"Status: {txt}")
-        if "Connected" in txt:
-            self.lobby.user_list.clear()
-            self.lobby.user_list.addItem(QListWidgetItem("🟢 Active Peer"))
-            self.switch_to_chat()
-        elif "Disconnected" in txt or "❌" in txt:
+        if "Disconnected" in txt or "❌" in txt:
             self.lobby.user_list.clear()
             self.lobby.user_list.addItem(QListWidgetItem("No active connections"))
             self.lobby.host_btn.setEnabled(True)
             self.lobby.join_btn.setEnabled(True)
 
+    def _on_session_ready(self, peer_pubkey_bytes):
+        global session_box
+        try:
+            peer_pub = PublicKey(peer_pubkey_bytes)
+            session_box = Box(my_private_key, peer_pub)
+            self.switch_to_chat()
+        except Exception as e:
+            self.lobby.status_lbl.setText(f"❌ Key exchange failed: {e}")
+            self.net.disconnect()
+
     def switch_to_chat(self):
+        self.lobby.user_list.clear()
+        self.lobby.user_list.addItem(QListWidgetItem("🟢 Active Peer"))
         self.stacked.setCurrentWidget(self.chat)
         self.chat.header_name.setText(f"Profile of the user Chat: {self.profile['name']}")
         self.chat.input_box.setEnabled(True)
@@ -735,13 +706,11 @@ class PositiveChatApp(QMainWindow):
 
     def send_message(self):
         txt = self.chat.input_box.text().strip()
-        if txt:
-            self._send_chat_text(txt)
+        if txt: self._send_chat_text(txt)
 
     def handle_file_received(self, filename, data):
         save_path = DOWNLOADS_DIR / filename
-        with open(save_path, 'wb') as f:
-            f.write(data)
+        with open(save_path, 'wb') as f: f.write(data)
         filesize = len(data)
         self.chat.add_file_bubble(filename, filesize, is_sent=False,
                                   save_callback=lambda n, s: self.save_received_file(n, data))
@@ -750,8 +719,7 @@ class PositiveChatApp(QMainWindow):
     def save_received_file(self, filename, data):
         save_path, _ = QFileDialog.getSaveFileName(self, "Save File", str(DOWNLOADS_DIR / filename), "All Files (*)")
         if save_path:
-            with open(save_path, 'wb') as f:
-                f.write(data)
+            with open(save_path, 'wb') as f: f.write(data)
             QMessageBox.information(self, "Saved", f"File saved to:\n{save_path}")
 
     def show_incoming(self, raw):
@@ -760,7 +728,7 @@ class PositiveChatApp(QMainWindow):
             self.chat.header_name.setText(f"Profile of the user Chat: {sender}")
             self.add_bubble(f"📩 {sender}: {ph}", False, (nonce, ct))
         except:
-            self.add_bubble(f" Raw: {raw}", False)
+            self.add_bubble(f"📩 Raw: {raw}", False)
 
     def add_bubble(self, text, is_sent, decrypt_data=None):
         bubble = MessageBubble(text, is_sent, decrypt_data)
