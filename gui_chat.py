@@ -101,14 +101,15 @@ def prepare_outgoing(text, use_ai=False, sender_name="You"):
         raise Exception("Session not ready")
 
     nonce = os.urandom(24)
-    # ✅ Fixed: Convert Ciphertext to bytes BEFORE hex encoding
-    ct_bytes = bytes(session_box.encrypt(text.encode(), nonce))
-    placeholder = generate_placeholder(text, use_ai=use_ai)
+    # ✅ Correct: Get ciphertext only (not nonce+ciphertext)
+    encrypted = session_box.encrypt(text.encode(), nonce)
+    ct = encrypted.ciphertext  # Just the ciphertext part
 
+    placeholder = generate_placeholder(text, use_ai=use_ai)
     db.execute("INSERT INTO messages (sender, placeholder, ciphertext, nonce) VALUES (?, ?, ?, ?)",
-               (sender_name, placeholder, ct_bytes.hex(), nonce.hex()))
+               (sender_name, placeholder, ct.hex(), nonce.hex()))
     db.commit()
-    return f"{sender_name}|{placeholder}|{nonce.hex()}|{ct_bytes.hex()}"
+    return f"{sender_name}|{placeholder}|{nonce.hex()}|{ct.hex()}"
 
 
 # 🌐 NETWORK HANDLER
@@ -264,11 +265,13 @@ class MessageBubble(QWidget):
             try:
                 nonce = bytes.fromhex(self.decrypt_data[0])
                 ct = bytes.fromhex(self.decrypt_data[1])
+                # ✅ Correct: Decrypt with separate nonce and ciphertext
                 plain = session_box.decrypt(ct, nonce).decode()
                 self.lbl.setText(self.prefix + "🔓 " + plain)
                 self.btn.setText("Encrypt")
                 self.is_decrypted = True
             except Exception as e:
+                print(f"Decrypt error: {e}")  # Debug info
                 self.lbl.setText(self.prefix + "❌ Failed")
                 self.btn.setEnabled(False)
 
@@ -703,10 +706,13 @@ class PositiveChatApp(QMainWindow):
     def _on_session_ready(self, peer_pubkey_bytes):
         global session_box
         try:
+            print(f"Received peer key: {len(peer_pubkey_bytes)} bytes")
             peer_pub = PublicKey(peer_pubkey_bytes)
             session_box = Box(my_private_key, peer_pub)
+            print("Session box created successfully!")
             self.switch_to_chat()
         except Exception as e:
+            print(f"Session setup failed: {e}")
             self.lobby.status_lbl.setText(f"❌ Key exchange failed: {e}")
             self.net.disconnect()
 
