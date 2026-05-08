@@ -8,8 +8,9 @@ import os
 import io
 import re
 import shutil
+import base64
 from pathlib import Path
-from nacl.secret import SecretBox
+from nacl.public import PrivateKey, PublicKey, Box
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QStackedWidget,
                                QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -43,16 +44,25 @@ DOWNLOADS_DIR = PROJECT_DIR / "downloads"
 PORT = 5555
 box = None
 db = None
+my_private_key = None
+my_public_key = None
+peer_public_key = None
+session_box = None
 
 AVATAR_DIR.mkdir(exist_ok=True)
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 
 def initialize_app():
-    global box, db
+    global box, db, my_private_key, my_public_key
+    # Load or generate persistent key pair for this device
     if not KEY_PATH.exists():
-        KEY_PATH.write_bytes(os.urandom(32))
-    box = SecretBox(KEY_PATH.read_bytes())
+        my_private_key = PrivateKey.generate()
+        KEY_PATH.write_bytes(bytes(my_private_key))
+    else:
+        my_private_key = PrivateKey(KEY_PATH.read_bytes())
+    my_public_key = my_private_key.public_key
+
     db = sqlite3.connect(DB_PATH, check_same_thread=False)
     db.execute("""CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT, placeholder TEXT,
@@ -88,8 +98,12 @@ except ImportError:
 
 
 def prepare_outgoing(text, use_ai=False, sender_name="You"):
-    nonce = os.urandom(SecretBox.NONCE_SIZE)
-    ct = box.encrypt(text.encode(), nonce).ciphertext
+    global session_box
+    if session_box is None:
+        raise Exception("No secure session established")
+
+    nonce = os.urandom(24)
+    ct = session_box.encrypt(text.encode(), nonce)
     placeholder = generate_placeholder(text, use_ai=use_ai)
     db.execute("INSERT INTO messages (sender, placeholder, ciphertext, nonce) VALUES (?, ?, ?, ?)",
                (sender_name, placeholder, ct.hex(), nonce.hex()))
@@ -106,6 +120,8 @@ class NetworkHandler(QObject):
     sock = None
 
     def start(self, mode, ip="127.0.0.1"):
+        global session_box, peer_public_key
+
         def run():
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -116,12 +132,26 @@ class NetworkHandler(QObject):
                     self.status_update.emit("🟢 Listening for peers...")
                     self.conn, _ = self.sock.accept()
                     self.sock.close()
+                    # Send public key first
+                    self.conn.sendall((f"PUBKEY|{base64.b64encode(bytes(my_public_key)).decode()}\n").encode())
                 else:
                     self.status_update.emit("🔵 Connecting...")
                     self.sock.connect((ip, PORT))
                     self.conn = self.sock
 
                 self.status_update.emit("✅ Connected!")
+
+                # Phase 1: Exchange public keys
+                pubkey_data = self.conn.recv(4096).decode("utf-8", errors="ignore").strip()
+                if pubkey_data.startswith("PUBKEY|"):
+                    peer_b64 = pubkey_data.split("|")[1]
+                    peer_public_key = base64.b64decode(peer_b64)
+                    session_box = Box(my_private_key, PublicKey(peer_public_key))
+                    self.status_update.emit(" Secure session established!")
+                else:
+                    raise ValueError("Invalid key exchange")
+
+                # Phase 2: Message/File loop
                 buffer = b""
                 while True:
                     chunk = self.conn.recv(4096)
@@ -184,6 +214,9 @@ class NetworkHandler(QObject):
             return False
 
     def disconnect(self):
+        global session_box, peer_public_key
+        session_box = None
+        peer_public_key = None
         try:
             if self.conn: self.conn.close()
             if self.sock: self.sock.close()
@@ -209,7 +242,7 @@ class MessageBubble(QWidget):
 
         self.lbl = QLabel(text)
         self.lbl.setWordWrap(True)
-        self.lbl.setMinimumWidth(400)
+        self.lbl.setMinimumWidth(60)
 
         if decrypt_data:
             self.btn = QPushButton("Decrypt")
@@ -229,14 +262,16 @@ class MessageBubble(QWidget):
             self.lbl.setStyleSheet(base)
 
     def _toggle(self):
-        if not self.decrypt_data: return
+        if not self.decrypt_data or session_box is None: return
         if self.is_decrypted:
             self.lbl.setText(self.prefix + self.content)
             self.btn.setText("Decrypt")
             self.is_decrypted = False
         else:
             try:
-                plain = box.decrypt(bytes.fromhex(self.decrypt_data[1]), bytes.fromhex(self.decrypt_data[0])).decode()
+                nonce = bytes.fromhex(self.decrypt_data[0])
+                ct = bytes.fromhex(self.decrypt_data[1])
+                plain = session_box.decrypt(ct, nonce).decode()
                 self.lbl.setText(self.prefix + "🔓 " + plain)
                 self.btn.setText("Encrypt")
                 self.is_decrypted = True
@@ -245,7 +280,7 @@ class MessageBubble(QWidget):
                 self.btn.setEnabled(False)
 
 
-# 📎 FILE BUBBLE
+#  FILE BUBBLE
 class FileBubble(QWidget):
     def __init__(self, filename, filesize, is_sent, save_callback=None):
         super().__init__()
@@ -357,7 +392,7 @@ class ProfileDialog(QDialog):
             pm = QPixmap(str(path)).scaled(90, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.avatar_lbl.setPixmap(pm)
         else:
-            self.avatar_lbl.setText("👤")
+            self.avatar_lbl.setText("")
 
     def _select_avatar(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Profile Picture", str(AVATAR_DIR),
@@ -420,7 +455,7 @@ class LobbyScreen(QWidget):
         self.avatar_lbl.setText("👤")
         top.addWidget(self.avatar_lbl)
 
-        self.profile_btn = QPushButton("Profile")
+        self.profile_btn = QPushButton("Profile! By clicking here you can add change name/picture")
         self.profile_btn.setStyleSheet("QPushButton { text-align: left; padding-left: 8px; }")
         top.addWidget(self.profile_btn)
         lay.addLayout(top)
@@ -696,7 +731,7 @@ class PositiveChatApp(QMainWindow):
             self.add_bubble(f"📤 {self.profile['name']}: {ph}", True, (nonce, ct))
             self.chat.input_box.clear()
         except Exception as e:
-            self.add_bubble(f"❌ Error: {e}", True)  # ✅ FIXED
+            self.add_bubble(f"❌ Error: {e}", True)
 
     def send_message(self):
         txt = self.chat.input_box.text().strip()
@@ -725,7 +760,7 @@ class PositiveChatApp(QMainWindow):
             self.chat.header_name.setText(f"Profile of the user Chat: {sender}")
             self.add_bubble(f"📩 {sender}: {ph}", False, (nonce, ct))
         except:
-            self.add_bubble(f"📩 Raw: {raw}", False)  # ✅ FIXED
+            self.add_bubble(f" Raw: {raw}", False)
 
     def add_bubble(self, text, is_sent, decrypt_data=None):
         bubble = MessageBubble(text, is_sent, decrypt_data)
